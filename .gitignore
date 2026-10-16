@@ -1,0 +1,13 @@
+# secrets and local state
+.env
+**/.env
+.venv/
+venv/
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+backend/uploads/*
+!backend/uploads/.gitkeep
