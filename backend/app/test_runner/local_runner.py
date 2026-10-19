@@ -3,6 +3,49 @@ from pathlib import Path
 import shutil
 import subprocess
 
+def run_static_fallback(project_path: Path) -> dict:
+    """
+    Safe fallback when Docker is unavailable.
+    Does not execute uploaded project code.
+    """
+    try:
+        from app.test_runner.source_checker import check_project_source
+
+        result = check_project_source(project_path)
+
+        return {
+            "status": result.get("status", "CHECKS_COMPLETED"),
+            "message": (
+                "Docker is unavailable. Static source checks completed; "
+                "runtime tests were not executed."
+            ),
+            "total": result.get("total_checks", 0),
+            "passed": result.get("passed", 0),
+            "failed": result.get("failed", 0),
+            "errors": result.get("errors", 0),
+            "skipped": 0,
+            "execution_mode": "STATIC_SAFE_CHECKS",
+            "output": "\n".join(
+                f'{item.get("status", "")}: '
+                f'{item.get("check", "")} - {item.get("details", "")}'
+                for item in result.get("results", [])
+            )[-12000:],
+        }
+
+    except (ImportError, OSError, ValueError) as exc:
+        return {
+            "status": "ERROR",
+            "message": "Static fallback could not complete.",
+            "total": 0,
+            "passed": 0,
+            "failed": 0,
+            "errors": 1,
+            "skipped": 0,
+            "execution_mode": "STATIC_SAFE_CHECKS",
+            "output": str(exc)[:2000],
+        }
+
+
 
 DOCKER_IMAGE = "ai-bug-detective-python-runner:latest"
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -21,6 +64,7 @@ def run_project_tests(
 
     project_path = Path(project_dir).resolve()
 
+    
     if not project_path.is_dir():
         return {
             "status": "ERROR",
@@ -34,19 +78,7 @@ def run_project_tests(
         }
 
     if shutil.which("docker") is None:
-        return {
-            "status": "DOCKER_UNAVAILABLE",
-            "message": (
-                "Docker is unavailable. "
-                "Only static source checks can run on this system."
-            ),
-            "total": 0,
-            "passed": 0,
-            "failed": 0,
-            "errors": 0,
-            "skipped": 0,
-            "output": "",
-        }
+        return run_static_fallback(project_path)
 
     if not (project_path / "tests").is_dir():
         return {
@@ -59,6 +91,7 @@ def run_project_tests(
             "skipped": 0,
             "output": "",
         }
+
 
     command = [
         "docker", "run", "--rm",

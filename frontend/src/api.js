@@ -66,3 +66,15 @@ export const getLocalTestReport = async () => {
   const response = await api.get('/test-runner/local-report');
   return response.data;
 };
+
+export const downloadProjectTestReportExcel = async (uploadId) => {
+  const response = await api.get(
+    `/projects/${encodeURIComponent(uploadId)}/test-report/excel`,
+    {
+      responseType: 'blob',
+    }
+  );
+
+  return response.data;
+};
+
