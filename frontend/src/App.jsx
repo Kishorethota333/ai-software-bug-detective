@@ -12,7 +12,8 @@ import { Bug, LayoutDashboard, FolderKanban, ListChecks, LogOut, Plus, ShieldChe
 
 import api, {
   messageOf,
-  downloadProjectTestReportExcel
+  downloadProjectTestReportExcel,
+  executeProjectTests
 } from './api';
 
 
@@ -20,7 +21,29 @@ const AuthContext = createContext(null);
 
 
 
+const UPLOAD_ID_STORAGE_KEY = 'bug_detective_upload_id';
+
+
+
 const useAuth = () => useContext(AuthContext);
+
+
+
+const isValidUploadId = (uploadId) =>
+  typeof uploadId === 'string' && /^[a-f0-9]{32}$/i.test(uploadId);
+
+
+
+const getSavedUploadId = () => {
+  const uploadId = localStorage.getItem(UPLOAD_ID_STORAGE_KEY);
+  if (!isValidUploadId(uploadId)) {
+    if (uploadId !== null) {
+      localStorage.removeItem(UPLOAD_ID_STORAGE_KEY);
+    }
+    return null;
+  }
+  return uploadId;
+};
 
 
 
@@ -72,7 +95,54 @@ function BugDetails() { const loc = useLocation(); const id = loc.pathname.split
 
 
 
-function Tests() { const [items, setItems] = useState([]), [error, setError] = useState(''); useEffect(() => { api.get('/test-cases').then(r => setItems(r.data)).catch(e => setError(messageOf(e))) }, []); return <><PageHead eyebrow="QUALITY / VALIDATION" title="Test cases" subtitle="Track the regression checks generated during bug investigations." /><Error text={error} /><div className="panel"><div className="table-wrap"><table><thead><tr><th>SCENARIO</th><th>BUG</th><th>TYPE</th><th>PRIORITY</th><th>EXECUTED</th></tr></thead><tbody>{items.map(c => <tr key={c.id}><td><Link className="bug-link" to={`/bugs/${c.bug_id}`}>{c.scenario}</Link><div className="table-sub">Expected: {c.expected_result}</div></td><td>BUG-{c.bug_id}</td><td>{c.test_type}</td><td><span className={`pill ${c.priority.toLowerCase()}`}>{c.priority}</span></td><td>{c.executed ? 'Yes' : 'Not yet'}</td></tr>)}</tbody></table>{items.length === 0 && <div className="empty"><div className="empty-icon"><ListChecks /></div><b>No test cases yet</b><p>Run AI analysis on a bug to generate test cases.</p><Link to="/bugs" className="text-link">Browse bugs →</Link></div>}</div></div></> }
+function Tests() {
+  const [items, setItems] = useState([]);
+  const [error, setError] = useState('');
+  const [downloading, setDownloading] = useState(false);
+
+  useEffect(() => {
+    api.get('/test-cases').then(r => setItems(r.data)).catch(e => setError(messageOf(e)));
+  }, []);
+
+  const downloadExcel = async () => {
+    const uploadId = getSavedUploadId();
+    if (!uploadId) {
+      setError('Upload a ZIP project first to download its Excel report.');
+      return;
+    }
+
+    setDownloading(true);
+    setError('');
+    try {
+      const blob = await downloadProjectTestReportExcel(uploadId);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `bug-detective-report-${uploadId}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return <>
+    <PageHead
+      eyebrow="QUALITY / VALIDATION"
+      title="Test cases"
+      subtitle="Track the regression checks generated during bug investigations."
+      action={<Button type="button" onClick={downloadExcel} disabled={downloading}>
+        {downloading ? 'Downloading Excel...' : 'Download Excel'}
+      </Button>}
+    />
+    <Error text={error} />
+    <div className="panel"><div className="table-wrap"><table><thead><tr><th>SCENARIO</th><th>BUG</th><th>TYPE</th><th>PRIORITY</th><th>EXECUTED</th></tr></thead><tbody>{items.map(c => <tr key={c.id}><td><Link className="bug-link" to={`/bugs/${c.bug_id}`}>{c.scenario}</Link><div className="table-sub">Expected: {c.expected_result}</div></td><td>BUG-{c.bug_id}</td><td>{c.test_type}</td><td><span className={`pill ${c.priority.toLowerCase()}`}>{c.priority}</span></td><td>{c.executed ? 'Yes' : 'Not yet'}</td></tr>)}</tbody></table>{items.length === 0 && <div className="empty"><div className="empty-icon"><ListChecks /></div><b>No test cases yet</b><p>Run AI analysis on a bug to generate test cases.</p><Link to="/bugs" className="text-link">Browse bugs →</Link></div>}</div></div>
+  </>;
+}
 
 
 
@@ -86,6 +156,7 @@ function UploadProject() {
   const [analysis, setAnalysis] = useState(null);
   const [generation, setGeneration] = useState(null);
   const [checks, setChecks] = useState(null);
+  const [execution, setExecution] = useState(null);
   const [report, setReport] = useState(null);
 
   const chooseFile = (event) => {
@@ -95,6 +166,7 @@ function UploadProject() {
     setAnalysis(null);
     setGeneration(null);
     setChecks(null);
+    setExecution(null);
     setReport(null);
 
     if (selected && !selected.name.toLowerCase().endsWith('.zip')) {
@@ -141,11 +213,16 @@ function UploadProject() {
     setAnalysis(null);
     setGeneration(null);
     setChecks(null);
+    setExecution(null);
     setReport(null);
     try {
       const body = new FormData();
       body.append('file', file);
       const response = await api.post('/projects/upload-source', body);
+      if (!isValidUploadId(response.data?.upload_id)) {
+        throw new Error('Upload completed, but the server returned an invalid upload ID.');
+      }
+      localStorage.setItem(UPLOAD_ID_STORAGE_KEY, response.data.upload_id);
       setResult(response.data);
     } catch (err) {
       setError(messageOf(err));
@@ -170,12 +247,32 @@ function UploadProject() {
       setChecks);
   };
 
+  const executeTests = async () => {
+    if (!result?.upload_id) {
+      setError('Upload a ZIP file first.');
+      return;
+    }
+
+    setBusy('execution');
+    setError('');
+    try {
+      const data = await executeProjectTests(result.upload_id);
+      // Store the full execute-tests response separately from static checks.
+      setExecution(data);
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy('');
+    }
+  };
+
   const loadReport = async () => {
     await runAction('report',
       (id) => api.get(`/projects/${encodeURIComponent(id)}/test-report`),
       setReport);
   };
-    const downloadExcel = async () => {
+
+  const downloadExcel = async () => {
     if (!result?.upload_id) {
       setError('Upload a ZIP file first.');
       return;
@@ -210,6 +307,16 @@ function UploadProject() {
     }
     return 0;
   };
+
+  // Derive display values from the execute-tests response.
+  const runtime = execution?.runtime_result || null;
+  const executionMode =
+    execution?.execution_mode || runtime?.execution_mode || '';
+  const runtimeMessage = runtime?.message || execution?.note || '';
+  const runtimeStatus = runtime?.status || '';
+  const dockerUnavailable =
+    executionMode === 'STATIC_SAFE_CHECKS' ||
+    /docker/i.test(runtimeMessage) && /unavailable|not available|not installed|not running/i.test(runtimeMessage);
 
   return <>
     <PageHead
@@ -270,12 +377,20 @@ function UploadProject() {
             <Button type="button" disabled={Boolean(busy) || !analysis} onClick={runChecks}>
               {busy === 'checks' ? 'Running checks…' : '3. Run static checks'}
             </Button>
-            <Button type="button" disabled={Boolean(busy) || !checks} onClick={loadReport}>
+
+            <button
+              type="button"
+              onClick={executeTests}
+              disabled={!!busy}
+            >
+              {busy === 'execution' ? 'Executing tests…' : 'Execute Tests'}
+            </button>
+            <Button type="button" disabled={Boolean(busy) || !result?.upload_id} onClick={loadReport}>
               {busy === 'report' ? 'Loading report…' : '4. View test report'}
             </Button>
             <Button
               type="button"
-              disabled={Boolean(busy) || !checks}
+              disabled={Boolean(busy) || !result?.upload_id}
               onClick={downloadExcel}
             >
               {busy === 'excel' ? 'Downloading Excel…' : '5. Download Excel Report'}
@@ -312,18 +427,81 @@ function UploadProject() {
         </div>}
 
         {checks && <div className="panel" style={{ marginTop: 18 }}>
-          <h3>Static check results</h3>
+          <h3>Static Check Results</h3>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Static source and configuration checks only. Uploaded code is not executed by this step.
+          </p>
           <div className="stats-grid">
             <div className="stat-card"><div className="stat-top">Total checks</div><div className="stat-value">{count(checks, ['total_checks', 'total'])}</div></div>
             <div className="stat-card"><div className="stat-top">Passed</div><div className="stat-value">{count(checks, ['passed', 'passed_checks'])}</div></div>
             <div className="stat-card"><div className="stat-top">Failed</div><div className="stat-value">{count(checks, ['failed', 'failed_checks_count'])}</div></div>
             <div className="stat-card"><div className="stat-top">Errors</div><div className="stat-value">{count(checks, ['errors', 'error_count'])}</div></div>
           </div>
+          {checks.execution_mode && (
+            <div className="property">
+              <label>Execution mode</label>
+              <b>{checks.execution_mode}</b>
+            </div>
+          )}
           <p className="muted">{checks.note || 'Static checks do not prove the application is bug-free and are not the same as executing generated test cases.'}</p>
           {(checks.all_results || checks.results || []).map((item, index) => <div className="attachment" key={`${item.check || 'check'}-${index}`}>
             <div className="file-icon">{item.status || 'CHECK'}</div>
             <div><b>{item.check || item.name || `Check ${index + 1}`}</b><small>{item.details || item.message || ''}</small></div>
           </div>)}
+        </div>}
+
+        {execution && <div className="panel" style={{ marginTop: 18 }}>
+          <h3>Test Execution Results</h3>
+
+          <div className="property">
+            <label>Execution mode</label>
+            <b>{executionMode || 'UNKNOWN'}</b>
+          </div>
+          {runtimeStatus && (
+            <div className="property">
+              <label>Runner status</label>
+              <span className="status">{runtimeStatus}</span>
+            </div>
+          )}
+
+          {dockerUnavailable && (
+            <div className="alert error" style={{ marginTop: 12 }}>
+              Runtime tests were <b>not executed</b>. The backend reports that Docker is unavailable,
+              so only safe static checks were used. No runtime PASS/FAIL results exist for this upload.
+            </div>
+          )}
+
+          {runtimeMessage && (
+            <p className="muted" style={{ marginTop: 12 }}>{runtimeMessage}</p>
+          )}
+
+          {runtime && (typeof runtime.total === 'number' ||
+            typeof runtime.passed === 'number' ||
+            typeof runtime.failed === 'number' ||
+            typeof runtime.errors === 'number' ||
+            typeof runtime.skipped === 'number') && (
+            <div className="stats-grid" style={{ marginTop: 12 }}>
+              <div className="stat-card"><div className="stat-top">Total</div><div className="stat-value">{runtime.total ?? 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Passed</div><div className="stat-value">{runtime.passed ?? 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Failed</div><div className="stat-value">{runtime.failed ?? 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Errors</div><div className="stat-value">{runtime.errors ?? 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Skipped</div><div className="stat-value">{runtime.skipped ?? 0}</div></div>
+            </div>
+          )}
+
+          {runtime?.output && (
+            <div className="context-block" style={{ marginTop: 12 }}>
+              <label>Execution output</label>
+              <pre style={{ maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
+                {String(runtime.output).slice(0, 8000)}
+              </pre>
+            </div>
+          )}
+
+          <p className="muted" style={{ marginTop: 12 }}>
+            Runtime tests run only inside the configured Docker runner. If Docker is unavailable,
+            this panel will explicitly say so — static checks are never labeled as runtime results.
+          </p>
         </div>}
 
         {report && <div className="panel" style={{ marginTop: 18 }}>

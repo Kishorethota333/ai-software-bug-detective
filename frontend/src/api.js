@@ -77,4 +77,10 @@ export const downloadProjectTestReportExcel = async (uploadId) => {
 
   return response.data;
 };
+export const executeProjectTests = async (uploadId) => {
+  const response = await api.post(
+    `/projects/${encodeURIComponent(uploadId)}/execute-tests`
+  );
 
+  return response.data;
+};

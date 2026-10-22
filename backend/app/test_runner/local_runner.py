@@ -1,20 +1,36 @@
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
+
+
+DOCKER_IMAGE = "ai-bug-detective-python-runner:latest"
+DEFAULT_TIMEOUT_SECONDS = 120
+
 
 def run_static_fallback(project_path: Path) -> dict:
     """
     Safe fallback when Docker is unavailable.
-    Does not execute uploaded project code.
+    Performs static source checks only.
+    Never executes uploaded project code on the host.
     """
     try:
         from app.test_runner.source_checker import check_project_source
 
         result = check_project_source(project_path)
 
+        results = result.get("results", [])
+
+        output = "\n".join(
+            f'{item.get("status", "")}: '
+            f'{item.get("check", "")} - '
+            f'{item.get("details", "")}'
+            for item in results
+        )
+
         return {
-            "status": result.get("status", "CHECKS_COMPLETED"),
+            "status": "DOCKER_UNAVAILABLE",
             "message": (
                 "Docker is unavailable. Static source checks completed; "
                 "runtime tests were not executed."
@@ -24,12 +40,9 @@ def run_static_fallback(project_path: Path) -> dict:
             "failed": result.get("failed", 0),
             "errors": result.get("errors", 0),
             "skipped": 0,
+            "runtime_executed": False,
             "execution_mode": "STATIC_SAFE_CHECKS",
-            "output": "\n".join(
-                f'{item.get("status", "")}: '
-                f'{item.get("check", "")} - {item.get("details", "")}'
-                for item in result.get("results", [])
-            )[-12000:],
+            "output": output[-12000:],
         }
 
     except (ImportError, OSError, ValueError) as exc:
@@ -41,14 +54,10 @@ def run_static_fallback(project_path: Path) -> dict:
             "failed": 0,
             "errors": 1,
             "skipped": 0,
+            "runtime_executed": False,
             "execution_mode": "STATIC_SAFE_CHECKS",
             "output": str(exc)[:2000],
         }
-
-
-
-DOCKER_IMAGE = "ai-bug-detective-python-runner:latest"
-DEFAULT_TIMEOUT_SECONDS = 120
 
 
 def run_project_tests(
@@ -56,15 +65,15 @@ def run_project_tests(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict:
     """
-    Prepare isolated pytest execution for uploaded projects.
+    Run project pytest tests inside an isolated Docker container.
 
+    If Docker is unavailable, run safe static source checks instead.
     Uploaded code is never executed directly on the host.
-    Docker must be installed and the runner image must exist.
     """
 
     project_path = Path(project_dir).resolve()
 
-    
+    # 1. Validate the project directory.
     if not project_path.is_dir():
         return {
             "status": "ERROR",
@@ -74,27 +83,38 @@ def run_project_tests(
             "failed": 0,
             "errors": 1,
             "skipped": 0,
+            "runtime_executed": False,
+            "execution_mode": "NOT_EXECUTED",
             "output": "",
         }
 
+    # 2. If Docker is unavailable, use the safe static-check fallback.
     if shutil.which("docker") is None:
         return run_static_fallback(project_path)
 
+    # 3. Check whether the uploaded project contains tests.
     if not (project_path / "tests").is_dir():
         return {
             "status": "NO_TESTS_FOUND",
-            "message": "No tests directory was found in the project.",
+            "message": (
+                "No tests directory was found in the project. "
+                "Runtime tests were not executed."
+            ),
             "total": 0,
             "passed": 0,
             "failed": 0,
             "errors": 0,
             "skipped": 0,
+            "runtime_executed": False,
+            "execution_mode": "DOCKER_ISOLATED",
             "output": "",
         }
 
-
+    # 4. Run tests inside the isolated Docker container.
     command = [
-        "docker", "run", "--rm",
+        "docker",
+        "run",
+        "--rm",
         "--network", "none",
         "--memory", "512m",
         "--cpus", "1",
@@ -127,20 +147,27 @@ def run_project_tests(
             + (completed.stderr or "")
         ).strip()
 
-        # Parse the summary from pytest's final output line.
-        passed = failed = errors = skipped = 0
+        passed = 0
+        failed = 0
+        errors = 0
+        skipped = 0
 
+        # Parse pytest summary counts.
         for line in output.splitlines():
-            if " passed" not in line and not any(
+            if not any(
                 marker in line
-                for marker in (" failed", " error", " skipped")
+                for marker in (
+                    " passed",
+                    " failed",
+                    " error",
+                    " errors",
+                    " skipped",
+                )
             ):
                 continue
 
-            import re
-
             counts = {
-                name: int(value or 0)
+                name: int(value)
                 for value, name in re.findall(
                     r"(\d+)\s+(passed|failed|errors?|skipped)",
                     line,
@@ -157,7 +184,7 @@ def run_project_tests(
 
         if completed.returncode == 0:
             status = "PASSED"
-        elif total:
+        elif total > 0:
             status = "FAILED"
         else:
             status = "ERROR"
@@ -171,6 +198,8 @@ def run_project_tests(
             "errors": errors,
             "skipped": skipped,
             "exit_code": completed.returncode,
+            "runtime_executed": True,
+            "execution_mode": "DOCKER_ISOLATED",
             "output": output[-12000:],
         }
 
@@ -183,10 +212,12 @@ def run_project_tests(
             "failed": 0,
             "errors": 1,
             "skipped": 0,
+            "runtime_executed": False,
+            "execution_mode": "DOCKER_ISOLATED",
             "output": "",
         }
 
-    except OSError:
+    except OSError as exc:
         return {
             "status": "ERROR",
             "message": "Unable to start the Docker test runner.",
@@ -195,5 +226,7 @@ def run_project_tests(
             "failed": 0,
             "errors": 1,
             "skipped": 0,
-            "output": "",
+            "runtime_executed": False,
+            "execution_mode": "DOCKER_ISOLATED",
+            "output": str(exc)[:2000],
         }
