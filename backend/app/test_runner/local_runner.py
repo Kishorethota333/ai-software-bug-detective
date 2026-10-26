@@ -39,7 +39,7 @@ def run_static_fallback(project_path: Path) -> dict:
             "passed": result.get("passed", 0),
             "failed": result.get("failed", 0),
             "errors": result.get("errors", 0),
-            "skipped": 0,
+            "skipped": result.get("skipped", 0),
             "runtime_executed": False,
             "execution_mode": "STATIC_SAFE_CHECKS",
             "output": output[-12000:],

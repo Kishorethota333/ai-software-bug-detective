@@ -77,6 +77,15 @@ export const downloadProjectTestReportExcel = async (uploadId) => {
 
   return response.data;
 };
+
+export const downloadTestCasesExcel = async () => {
+  const response = await api.get('/test-cases/excel', {
+    responseType: 'blob',
+  });
+
+  return response.data;
+};
+
 export const executeProjectTests = async (uploadId) => {
   const response = await api.post(
     `/projects/${encodeURIComponent(uploadId)}/execute-tests`

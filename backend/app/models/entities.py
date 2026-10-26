@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, DateTime, ForeignKey, Integer, Float
+from sqlalchemy import String, Text, DateTime, ForeignKey, Integer, Float, JSON, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.config.database import Base
 
@@ -26,6 +26,27 @@ class Project(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     owner: Mapped[User] = relationship(back_populates="projects")
     bugs: Mapped[list["Bug"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+
+class ProjectUpload(Base):
+    __tablename__ = "project_uploads"
+    upload_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+class SourceChunk(Base):
+    __tablename__ = "source_chunks"
+    __table_args__ = (
+        UniqueConstraint("upload_id", "source_name", "chunk_index"),
+        Index("ix_source_chunks_owner_upload", "owner_id", "upload_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    upload_id: Mapped[str] = mapped_column(ForeignKey("project_uploads.upload_id"), index=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    source_name: Mapped[str] = mapped_column(String(512))
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
+    embedding: Mapped[list[float]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 class Bug(Base):
     __tablename__ = "bugs"

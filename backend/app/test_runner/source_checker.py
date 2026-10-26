@@ -78,7 +78,7 @@ def check_project_source(project_dir: str | Path) -> dict:
                 results.append(
                     _result(
                         f"Source check: {file_path.name}",
-                        "ERROR",
+                        "SKIPPED",
                         "File exceeds the 1 MB safe-check limit.",
                     )
                 )
@@ -223,6 +223,7 @@ process.stdout.write('Syntax is valid');
     passed = sum(item["status"] == "PASS" for item in results)
     failed = sum(item["status"] == "FAIL" for item in results)
     errors = sum(item["status"] == "ERROR" for item in results)
+    skipped = sum(item["status"] == "SKIPPED" for item in results)
 
     return {
         "status": "CHECKS_COMPLETED",
@@ -231,6 +232,7 @@ process.stdout.write('Syntax is valid');
         "passed": passed,
         "failed": failed,
         "errors": errors,
+        "skipped": skipped,
         "files_checked": files_checked,
         "results": results,
         "note": (

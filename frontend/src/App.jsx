@@ -12,6 +12,7 @@ import { Bug, LayoutDashboard, FolderKanban, ListChecks, LogOut, Plus, ShieldChe
 
 import api, {
   messageOf,
+  downloadTestCasesExcel,
   downloadProjectTestReportExcel,
   executeProjectTests
 } from './api';
@@ -55,7 +56,101 @@ function Protected({ children }) { const { token } = useAuth(); return token ? c
 
 
 
-function Shell({ children }) { const { user, logout } = useAuth(); const [mobile, setMobile] = useState(false); const loc = useLocation(); const nav = [['/', 'Dashboard', LayoutDashboard], ['/projects', 'Projects', FolderKanban], ['/upload', 'Upload Project', UploadCloud], ['/bugs', 'Bugs', Bug], ['/tests', 'Test Cases', ListChecks]]; return <div className="shell"><aside className={`sidebar ${mobile ? 'show' : ''}`}><div className="brand"><div className="brand-icon"><Bug size={22} /></div><div><b>Bug Detective</b><small>AI DEBUG WORKSPACE</small></div><button className="mobile-close" onClick={() => setMobile(false)}><X /></button></div><div className="nav-label">WORKSPACE</div>{nav.map(([to, label, Icon]) => <Link key={to} to={to} onClick={() => setMobile(false)} className={`nav-link ${loc.pathname === to ? 'active' : ''}`}><Icon size={18} />{label}</Link>)}<div className="sidebar-bottom"><div className="secure"><ShieldCheck size={18} /><div><b>Workspace secured</b><small>JWT protected session</small></div></div><div className="profile"><div className="avatar">{user?.name?.slice(0, 1)?.toUpperCase() || 'U'}</div><div className="profile-copy"><b>{user?.name || 'Developer'}</b><small>{user?.role || 'DEVELOPER'}</small></div><button title="Logout" onClick={logout} className="icon-button"><LogOut size={17} /></button></div></div></aside><main className="main"><header className="topbar"><button className="mobile-menu icon-button" onClick={() => setMobile(true)}><Menu /></button><div><div className="eyebrow">ENGINEERING INTELLIGENCE</div><div className="top-title">AI Software Bug Detective</div></div><div className="top-right"><span className="online-dot" /> System workspace <div className="avatar small">{user?.name?.slice(0, 1)?.toUpperCase() || 'U'}</div></div></header><section className="content">{children}</section></main></div> }
+function Shell({ children }) {
+  const { user, logout } = useAuth();
+  const [mobile, setMobile] = useState(false);
+  const loc = useLocation();
+  const nav = [
+    ['/', 'Dashboard', LayoutDashboard],
+    ['/projects', 'Projects', FolderKanban],
+    ['/upload', 'Upload Project', UploadCloud],
+    ['/bugs', 'Bugs', Bug],
+    ['/tests', 'Test Cases', ListChecks],
+  ];
+
+  return (
+    <div className="shell">
+      <aside className={`sidebar ${mobile ? 'show' : ''}`}>
+        <div className="brand">
+          <div className="brand-icon"><Bug size={22} /></div>
+          <div><b>Bug Detective</b><small>AI DEBUG WORKSPACE</small></div>
+          <button
+            type="button"
+            className="mobile-close"
+            aria-label="Close navigation"
+            onClick={() => setMobile(false)}
+          >
+            <X />
+          </button>
+        </div>
+        <div className="nav-label">WORKSPACE</div>
+        {nav.map(([to, label, Icon]) => {
+          const active = to === '/'
+            ? loc.pathname === to
+            : loc.pathname === to || loc.pathname.startsWith(`${to}/`);
+
+          return (
+            <Link
+              key={to}
+              to={to}
+              onClick={() => setMobile(false)}
+              className={`nav-link ${active ? 'active' : ''}`}
+              aria-current={active ? 'page' : undefined}
+            >
+              <Icon size={18} />
+              {label}
+            </Link>
+          );
+        })}
+        <div className="sidebar-bottom">
+          <div className="secure">
+            <ShieldCheck size={18} />
+            <div><b>Workspace secured</b><small>JWT protected session</small></div>
+          </div>
+          <div className="profile">
+            <div className="avatar">{user?.name?.slice(0, 1)?.toUpperCase() || 'U'}</div>
+            <div className="profile-copy">
+              <b>{user?.name || 'Developer'}</b>
+              <small>{user?.role || 'DEVELOPER'}</small>
+            </div>
+            <button
+              type="button"
+              title="Logout"
+              aria-label="Log out"
+              onClick={logout}
+              className="icon-button"
+            >
+              <LogOut size={17} />
+            </button>
+          </div>
+        </div>
+      </aside>
+      <main className="main">
+        <header className="topbar">
+          <button
+            type="button"
+            className="mobile-menu icon-button"
+            aria-label="Open navigation"
+            aria-expanded={mobile}
+            onClick={() => setMobile(true)}
+          >
+            <Menu />
+          </button>
+          <div>
+            <div className="eyebrow">ENGINEERING INTELLIGENCE</div>
+            <div className="top-title">AI Software Bug Detective</div>
+          </div>
+          <div className="top-right">
+            <span className="online-dot" />
+            System workspace
+            <div className="avatar small">{user?.name?.slice(0, 1)?.toUpperCase() || 'U'}</div>
+          </div>
+        </header>
+        <section className="content">{children}</section>
+      </main>
+    </div>
+  );
+}
 
 
 
@@ -105,20 +200,14 @@ function Tests() {
   }, []);
 
   const downloadExcel = async () => {
-    const uploadId = getSavedUploadId();
-    if (!uploadId) {
-      setError('Upload a ZIP project first to download its Excel report.');
-      return;
-    }
-
     setDownloading(true);
     setError('');
     try {
-      const blob = await downloadProjectTestReportExcel(uploadId);
+      const blob = await downloadTestCasesExcel();
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `bug-detective-report-${uploadId}.xlsx`;
+      link.download = 'bug-detective-test-cases.xlsx';
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -175,10 +264,10 @@ function UploadProject() {
       setError('Please select a ZIP file.');
       return;
     }
-    if (selected && selected.size > 50 * 1024 * 1024) {
+    if (selected && selected.size > 500 * 1024 * 1024) {
       setFile(null);
       event.target.value = '';
-      setError('ZIP file must be 50 MB or smaller.');
+      setError('ZIP file must be 500 MB or smaller.');
       return;
     }
     setFile(selected);
@@ -308,15 +397,30 @@ function UploadProject() {
     return 0;
   };
 
-  // Derive display values from the execute-tests response.
+  const getSummary = (obj, fallback = {}) => {
+    if (!obj || typeof obj !== 'object') return fallback;
+    return {
+      total: count(obj, ['total', 'total_checks']),
+      passed: count(obj, ['passed', 'passed_checks']),
+      failed: count(obj, ['failed', 'failed_checks_count']),
+      errors: count(obj, ['errors', 'error_count']),
+      skipped: count(obj, ['skipped']),
+      status: obj.status || fallback.status || '',
+      message: obj.message || fallback.message || '',
+      execution_mode: obj.execution_mode || fallback.execution_mode || '',
+      note: obj.note || fallback.note || '',
+    };
+  };
+
   const runtime = execution?.runtime_result || null;
-  const executionMode =
-    execution?.execution_mode || runtime?.execution_mode || '';
-  const runtimeMessage = runtime?.message || execution?.note || '';
-  const runtimeStatus = runtime?.status || '';
+  const runtimeSummary = getSummary(runtime || execution || {}, execution || {});
+  const executionMode = execution?.execution_mode || runtimeSummary.execution_mode || '';
+  const runtimeStatus = execution?.status || runtimeSummary.status || '';
+  const runtimeMessage = runtime?.message || execution?.message || runtimeSummary.message || execution?.note || runtimeSummary.note || '';
   const dockerUnavailable =
     executionMode === 'STATIC_SAFE_CHECKS' ||
-    /docker/i.test(runtimeMessage) && /unavailable|not available|not installed|not running/i.test(runtimeMessage);
+    runtimeStatus === 'DOCKER_UNAVAILABLE' ||
+    (typeof runtimeMessage === 'string' && /docker/i.test(runtimeMessage) && /unavailable|not available|not installed|not running/i.test(runtimeMessage));
 
   return <>
     <PageHead
@@ -330,7 +434,7 @@ function UploadProject() {
         <div className="project-icon"><UploadCloud size={25} /></div>
         <div>
           <h3 style={{ margin: '0 0 5px' }}>Project source</h3>
-          <p className="muted" style={{ margin: 0 }}>ZIP only · Maximum 50 MB</p>
+          <p className="muted" style={{ margin: 0 }}>ZIP only · Maximum 500 MB</p>
         </div>
       </div>
       <form onSubmit={upload}>
@@ -360,9 +464,38 @@ function UploadProject() {
           <div className="property"><label>File name</label><b>{result.filename}</b></div>
           <div className="property"><label>Upload status</label><span className="status">{result.status}</span></div>
           <div className="property"><label>Files detected</label><b>{result.file_count}</b></div>
+          <div className="property"><label>Recognized source files</label><b>{result.source_file_count}</b></div>
           <div className="property"><label>File size</label><b>{(Number(result.size_bytes || 0) / 1024).toFixed(1)} KB</b></div>
           <div className="property"><label>Upload ID</label><code style={{ overflowWrap: 'anywhere' }}>{result.upload_id}</code></div>
         </div>
+
+        {result.unnecessary_items?.length > 0 && <div
+          className="alert"
+          role="status"
+          style={{ marginTop: 18, color: '#fcd34d', background: 'rgba(180,83,9,0.14)', border: '1px solid rgba(180,83,9,0.45)' }}
+        >
+          <strong>Cleanup recommended</strong>
+          <p style={{ margin: '6px 0' }}>The upload is valid, but these generated or cache entries are usually unnecessary. Remove them before your next upload to reduce size and improve inspection speed.</p>
+          <ul style={{ margin: 0, paddingLeft: 20 }}>
+            {result.unnecessary_items.map((item) => (
+              <li key={item.name}>{item.name}: {item.count} ZIP {item.count === 1 ? 'entry' : 'entries'}</li>
+            ))}
+          </ul>
+        </div>}
+
+        {result.security_warnings?.length > 0 && <div
+          className="alert"
+          role="alert"
+          style={{ marginTop: 18, color: '#fca5a5', background: 'rgba(220,38,38,0.12)', border: '1px solid rgba(220,38,38,0.45)' }}
+        >
+          <strong>Security-sensitive files removed</strong>
+          <p style={{ margin: '6px 0' }}>These filenames were detected and excluded from the stored project ZIP. File contents are never displayed.</p>
+          <ul style={{ margin: 0, paddingLeft: 20 }}>
+            {result.security_warnings.map((item) => (
+              <li key={item.name}>{item.name}: {item.count} {item.count === 1 ? 'file' : 'files'} removed</li>
+            ))}
+          </ul>
+        </div>}
 
         <div className="panel" style={{ marginTop: 18 }}>
           <h3>Analysis & test workflow</h3>
@@ -419,11 +552,15 @@ function UploadProject() {
               <p><b>Input:</b> {test.input_data || 'Not specified'}</p>
               <p><b>Expected:</b> {test.expected_result || 'Not specified'}</p>
               <p><b>Priority / type:</b> {test.priority || '—'} / {test.test_type || '—'}</p>
-              <p><b>Status:</b> {test.execution_status || 'NOT_RUN'}</p>
+              <p><b>Status:</b> <span className={`result-status result-status-${String(test.execution_status || 'NOT_RUN').toLowerCase()}`}>{test.execution_status || 'NOT_RUN'}</span></p>
             </div>
           </div>)}
           {(!generation.test_cases || generation.test_cases.length === 0) && <p className="muted">The API did not return test case details.</p>}
           {generation.provider && <div className="provider-note">Provider: {generation.provider}</div>}
+          {generation.rag && <div className="provider-note">
+            RAG: {generation.rag.status} · {generation.rag.retrieved_chunks} source chunks retrieved.
+            {generation.rag.status !== 'RETRIEVED' && ` ${generation.rag.message}`}
+          </div>}
         </div>}
 
         {checks && <div className="panel" style={{ marginTop: 18 }}>
@@ -436,6 +573,7 @@ function UploadProject() {
             <div className="stat-card"><div className="stat-top">Passed</div><div className="stat-value">{count(checks, ['passed', 'passed_checks'])}</div></div>
             <div className="stat-card"><div className="stat-top">Failed</div><div className="stat-value">{count(checks, ['failed', 'failed_checks_count'])}</div></div>
             <div className="stat-card"><div className="stat-top">Errors</div><div className="stat-value">{count(checks, ['errors', 'error_count'])}</div></div>
+            <div className="stat-card"><div className="stat-top">Skipped</div><div className="stat-value">{count(checks, ['skipped'])}</div></div>
           </div>
           {checks.execution_mode && (
             <div className="property">
@@ -445,7 +583,7 @@ function UploadProject() {
           )}
           <p className="muted">{checks.note || 'Static checks do not prove the application is bug-free and are not the same as executing generated test cases.'}</p>
           {(checks.all_results || checks.results || []).map((item, index) => <div className="attachment" key={`${item.check || 'check'}-${index}`}>
-            <div className="file-icon">{item.status || 'CHECK'}</div>
+            <div className={`file-icon result-status result-status-${(item.status || 'check').toLowerCase()}`}>{item.status || 'CHECK'}</div>
             <div><b>{item.check || item.name || `Check ${index + 1}`}</b><small>{item.details || item.message || ''}</small></div>
           </div>)}
         </div>}
@@ -475,25 +613,31 @@ function UploadProject() {
             <p className="muted" style={{ marginTop: 12 }}>{runtimeMessage}</p>
           )}
 
-          {runtime && (typeof runtime.total === 'number' ||
-            typeof runtime.passed === 'number' ||
-            typeof runtime.failed === 'number' ||
-            typeof runtime.errors === 'number' ||
-            typeof runtime.skipped === 'number') && (
+          {!dockerUnavailable && ((runtime?.runtime_executed === true) || (
+            typeof runtime?.total === 'number' ||
+            typeof runtime?.passed === 'number' ||
+            typeof runtime?.failed === 'number' ||
+            typeof runtime?.errors === 'number' ||
+            typeof runtime?.skipped === 'number' ||
+            typeof execution?.total === 'number' ||
+            typeof execution?.passed === 'number' ||
+            typeof execution?.failed === 'number' ||
+            typeof execution?.errors === 'number' ||
+            typeof execution?.skipped === 'number')) && (
             <div className="stats-grid" style={{ marginTop: 12 }}>
-              <div className="stat-card"><div className="stat-top">Total</div><div className="stat-value">{runtime.total ?? 0}</div></div>
-              <div className="stat-card"><div className="stat-top">Passed</div><div className="stat-value">{runtime.passed ?? 0}</div></div>
-              <div className="stat-card"><div className="stat-top">Failed</div><div className="stat-value">{runtime.failed ?? 0}</div></div>
-              <div className="stat-card"><div className="stat-top">Errors</div><div className="stat-value">{runtime.errors ?? 0}</div></div>
-              <div className="stat-card"><div className="stat-top">Skipped</div><div className="stat-value">{runtime.skipped ?? 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Total</div><div className="stat-value">{runtimeSummary.total || execution?.total || 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Passed</div><div className="stat-value">{runtimeSummary.passed || execution?.passed || 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Failed</div><div className="stat-value">{runtimeSummary.failed || execution?.failed || 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Errors</div><div className="stat-value">{runtimeSummary.errors || execution?.errors || 0}</div></div>
+              <div className="stat-card"><div className="stat-top">Skipped</div><div className="stat-value">{runtimeSummary.skipped || execution?.skipped || 0}</div></div>
             </div>
           )}
 
-          {runtime?.output && (
+          {(runtime?.output || execution?.output) && !dockerUnavailable && (
             <div className="context-block" style={{ marginTop: 12 }}>
               <label>Execution output</label>
               <pre style={{ maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap' }}>
-                {String(runtime.output).slice(0, 8000)}
+                {String(runtime?.output || execution?.output).slice(0, 8000)}
               </pre>
             </div>
           )}
@@ -513,9 +657,10 @@ function UploadProject() {
             <div className="stat-card"><div className="stat-top">Passed</div><div className="stat-value">{count(report.summary, ['passed'])}</div></div>
             <div className="stat-card"><div className="stat-top">Failed</div><div className="stat-value">{count(report.summary, ['failed'])}</div></div>
             <div className="stat-card"><div className="stat-top">Errors</div><div className="stat-value">{count(report.summary, ['errors'])}</div></div>
+            <div className="stat-card"><div className="stat-top">Skipped</div><div className="stat-value">{count(report.summary, ['skipped'])}</div></div>
           </div>}
           {(report.all_results || []).map((item, index) => <div className="attachment" key={`${item.check || 'report'}-${index}`}>
-            <div className="file-icon">{item.status || 'CHECK'}</div>
+            <div className={`file-icon result-status result-status-${(item.status || 'check').toLowerCase()}`}>{item.status || 'CHECK'}</div>
             <div><b>{item.check || `Check ${index + 1}`}</b><small>{item.details || ''}</small></div>
           </div>)}
           <p className="muted">This report currently summarizes static source checks. Full application-level PASS/FAIL results require a configured isolated test runner.</p>
