@@ -2,36 +2,54 @@
 
 ## Summary
 
-Current delivery status is **75% (6 of 8 original checklist items)**. This counts implemented and tested behavior; it does not imply live external integrations are verified. No code was changed for this status report, and no database migration was run.
+This status reflects the latest safe verification on 2026-10-29. Backend tests and API workflows that write data used temporary SQLite databases and temporary upload directories; the configured PostgreSQL database and existing uploads were not used. The final live Gemini analyzer sample made no database or upload changes. No database migration was run.
 
-## Original Requirements Checklist
+The latest targeted backend run completed with **38 passed** across `test_ai_analyzer.py`, `test_rag.py`, `test_project_upload_validation.py`, and `test_smoke.py`, using temporary SQLite and upload storage. This was not a full backend-suite run. The frontend production build passed previously and was not rerun because frontend code did not change. One live Gemini analyzer request for a safe ZeroDivisionError sample returned cases covering `10 / 2 = 5` and controlled handling of `10 / 0`.
 
-| Requirement | Status | Evidence |
+## Requirements Checklist
+
+| Area | Status | Evidence |
 | --- | --- | --- |
-| RAG pipeline: source chunking, embeddings, vector storage, similarity retrieval, and prompt injection | PASS, controlled test evidence | `backend/tests/test_rag.py` covers chunking, persisted vectors, similarity ranking, prompt injection, and unavailable-service responses. These tests use controlled embeddings. Live embedding retrieval is not verified. |
-| Real AI provider | NOT VERIFIED | Provider integration exists. Current configuration is `AI_PROVIDER=mock`; no AI API key is configured, and no live provider call was verified. |
-| Backend tests and core API workflows | PASS | Latest recorded backend suite: 27 passed. Existing smoke coverage exercises registration, project/bug creation, mock analysis, test cases, and test-case Excel export. |
-| Frontend production build | PASS | Latest recorded `npm run build` succeeded. |
-| Authorization | PASS | JWT authentication and project ownership checks are implemented; backend tests passed, including unauthenticated upload rejection. |
-| Isolated runtime execution | NOT VERIFIED | Docker command is unavailable on PATH. The implementation uses a Docker runner and explicitly falls back to static checks when Docker is unavailable. No uploaded code was executed on the host. |
-| Uploaded-code execution safety | PASS | Static analysis/fallback does not execute uploaded source on the host; upload validation tests passed. |
-| Project-upload Excel report download | PASS, user-reported browser evidence | The user reports that the project-upload Excel report downloaded successfully in the browser. This was not independently repeated for this document. |
+| React/Vite frontend and FastAPI backend | IMPLEMENTED AND VERIFIED | Backend tests and Vite production build pass. Browser workflow was not automated; no Playwright project tests are configured. |
+| Login, registration, JWT-protected routes, and ownership checks | IMPLEMENTED, PARTIALLY VERIFIED | Isolated backend tests cover registration, unauthenticated requests, and cross-user project/bug-analysis restrictions. Login and expired-token behavior were not exercised in this test run; JWT signature and expiry checks were inspected in code. Browser authentication was not verified. |
+| Projects, bugs, bug analysis, and generated test-case persistence | IMPLEMENTED AND VERIFIED FOR SAMPLE FLOW | An isolated authenticated API flow created temporary user/project/bug records, called Gemini for a ZeroDivisionError sample, returned HTTP 200, and retrieved generated cases. All test records were in temporary SQLite and removed after the check. |
+| Mock, OpenAI, Groq, and Gemini provider selection | IMPLEMENTED AND TESTED | Mocked provider tests cover mock, Gemini request formatting, missing key, invalid responses, timeout, rate limit, API errors, and OpenAI compatibility. |
+| Live Gemini generation | VERIFIED FOR ONE ISOLATED API REQUEST | The authenticated bug-analysis API previously returned HTTP 200 with required diagnosis fields and valid severity. In the final database-free live analyzer request, provider was `gemini` and the response included both required division cases. This verifies individual requests, not ongoing availability, quota, or production reliability. |
+| Diagnosis fields and frontend display | IMPLEMENTED, PARTIALLY VERIFIED | Backend analysis contract and frontend field bindings exist; frontend build passes. No browser-rendered Gemini diagnosis was verified in this run. |
+| ZeroDivisionError generated cases | VERIFIED FOR ONE LIVE SAMPLE | Final live Gemini output included `10 / 2` with expected result `5`, and `10 / 0` with controlled-error handling. Cases were generated, not executed; no code fix was tested. |
+| Uploaded project validation and secret filtering | IMPLEMENTED AND TESTED | Tests cover ZIP path traversal, upload limits, sensitive-file filtering, and ownership-scoped project uploads. |
+| RAG chunking/retrieval/prompt inclusion | VERIFIED WITH CONTROLLED TESTS | `backend/tests/test_rag.py` verifies chunking, cosine ranking, persisted JSON embeddings, and retrieved-context injection using fake embeddings and isolated SQLite. The latest targeted run passed this test file. |
+| Live RAG embeddings and retrieval | BLOCKED BY CONFIGURATION | No `RAG_EMBEDDING_API_URL` or `RAG_EMBEDDING_API_KEY` is configured, and the OpenAI embedding fallback is unavailable while `AI_PROVIDER=gemini` and `AI_API_KEY` is empty. |
+| Isolated execution of uploaded project tests | NOT TESTED | Docker was not used. Uploaded project code was not run on the host. The runner is designed to use Docker or static checks only. |
+| Regression and generated-test execution | PARTIALLY VERIFIED | The focused analyzer regression suite passed. The AI-generated cases and any proposed fix were not executed. |
+| Excel/report workflows | PARTIALLY VERIFIED | The latest backend smoke test verified test-case Excel export and workbook contents. The project-upload report download has prior user-reported browser evidence, not a new independent browser check. |
+| Production readiness | BLOCKED / INCOMPLETE | Live RAG credentials are missing, browser and generated-test execution remain unverified, and security/operational hardening and database schema review remain before production. |
 
-## RAG And AI Setup
+## Final Completion Estimate
 
-RAG source retrieval is implemented for source-based test-case generation. Chunks and embeddings are stored in the SQLAlchemy database and selected by cosine similarity before being injected into the generation prompt.
+The estimate scores ten areas: Gemini live generation, ZeroDivisionError case coverage, RAG, authentication/authorization, uploads, frontend build, browser workflow, reports, regression/generated-test execution, and production readiness. Each verified area earns 1 point, each partial area 0.5, and each blocked or untested area 0. The current score is **6.5/10 = 65%**: Gemini live generation, case coverage, uploads, and frontend build are verified; RAG, authentication/authorization, browser workflow, reports, and regression/generated-test execution are partial; production readiness is blocked/incomplete. This is a verification/readiness estimate, not a measure of code volume. Generated-test execution and production readiness remain incomplete, so the project is not 100% complete.
 
-The current environment has no configured live provider credentials. For OpenAI embeddings, configure `AI_PROVIDER=openai` and `AI_API_KEY`. For a compatible alternative, configure `RAG_EMBEDDING_API_URL` and `RAG_EMBEDDING_API_KEY`; `RAG_EMBEDDING_MODEL` is optional and defaults to `text-embedding-3-small`. Live AI generation also requires a supported provider and `AI_API_KEY`. Do not put credential values in this document or source control.
+## Gemini Configuration And Status
 
-Controlled embedding tests are not evidence that live embeddings, live RAG retrieval, or a live AI provider call work. Source code may be sent to the configured embedding and AI services; upload only content approved for those services and remove secrets first.
+The backend settings and analyzer support `AI_PROVIDER=gemini`, `GEMINI_API_KEY`, and `GEMINI_MODEL`. The current effective provider is Gemini; the configured key is present but is never recorded here. `GEMINI_MODEL` is optional and defaults to `gemini-3.6-flash`. Google currently documents this model code; that does not establish key validity, quota, or end-to-end reliability.
+
+For Gemini, set `AI_PROVIDER`, `GEMINI_API_KEY`, and optionally `GEMINI_MODEL` in the local `backend/.env`. OpenAI and Groq continue to use `AI_API_KEY` and `AI_MODEL`; mock mode remains available with `AI_PROVIDER=mock`. Never copy credential values into documentation or source control. One authenticated, isolated ZeroDivisionError API analysis has now succeeded live; generated recommendations still require human review and execution in an approved test environment.
+
+## RAG And Embedding Configuration
+
+RAG is implemented for source-based test-case generation. It splits source documents into overlapping chunks, obtains embeddings from the separately configured OpenAI-compatible embedding endpoint, stores vectors as JSON arrays in the SQLAlchemy `SourceChunk` table, ranks them by cosine similarity, and injects selected chunks into the test-generation prompt. This is not a dedicated vector database or pgvector integration. Bug-report diagnosis does not currently use this RAG retrieval path.
+
+The RAG tests use controlled fake embeddings; they do not prove live embedding requests or live retrieval. Configure `RAG_EMBEDDING_API_URL` and `RAG_EMBEDDING_API_KEY` for a compatible embedding service, with optional `RAG_EMBEDDING_MODEL`. Alternatively, the existing automatic OpenAI embedding fallback requires `AI_PROVIDER=openai` and `AI_API_KEY`. Gemini configuration alone does not provide embeddings. The PostgreSQL migration/schema state was not checked or changed during this verification. Confirm the schema and obtain approval before applying any migration.
+
+Source code and diagnostics may be sent to configured AI/embedding providers. Upload only content approved for those services and remove secrets first.
 
 ## Runtime And Database
 
-Docker is unavailable in the checked environment, so actual isolated runtime execution is not verified. Do not run uploaded projects directly on the host. To verify runtime later, install and start Docker, provide the configured `ai-bug-detective-python-runner:latest` image, and use a trusted sample upload through the isolated runner.
+No Docker command or uploaded-code execution was used. The runtime runner uses Docker isolation when available and a static-check fallback when it is unavailable; static checks are not equivalent to executing generated test cases. Do not execute uploaded source on the host.
 
-The additive Alembic migration `9d7e2f1c4a60_add_source_chunks_for_rag.py` creates the RAG chunk table. It has not been applied to the configured database. For an Alembic-managed deployment, review and run `python -m alembic upgrade head` against the intended database before using persisted RAG. The app also creates missing SQLAlchemy tables at startup in the current MVP configuration.
+The configured PostgreSQL database was not used for tests. The RAG migration has not been applied as part of this verification. Do not run `alembic upgrade` until the target database and migration plan are reviewed and approved.
 
-## Startup And Verification Commands
+## Startup And Environment
 
 From the repository root, start the backend in one PowerShell terminal:
 
@@ -41,34 +59,35 @@ Set-Location .\backend
 uvicorn app.main:app --reload
 ```
 
-Start the frontend in a second PowerShell terminal:
+Start the frontend in a second terminal:
 
 ```powershell
 Set-Location .\frontend
 npm run dev
 ```
 
-Previously recorded verification commands and results:
+The frontend defaults to the API at `http://127.0.0.1:8000/api`; set `VITE_API_BASE_URL` when using a different backend address.
 
-```powershell
-Set-Location .\backend
-python -m pytest -q
-# 27 passed
-```
+Backend environment variable names (values belong only in the local ignored `backend/.env`):
 
-```powershell
-Set-Location .\frontend
-npm run build
-# Vite production build succeeded
-```
+- Core: `DATABASE_URL`, `JWT_SECRET`, `JWT_EXPIRE_MINUTES`, `CORS_ORIGINS`, `UPLOAD_DIR`, `MAX_UPLOAD_MB`
+- AI: `AI_PROVIDER`, `AI_API_KEY`, `AI_MODEL`, `GEMINI_API_KEY`, `GEMINI_MODEL`
+- RAG embeddings: `RAG_EMBEDDING_API_URL`, `RAG_EMBEDDING_API_KEY`, `RAG_EMBEDDING_MODEL`
 
-The Excel report browser download is user-reported evidence. No tests or migrations were run while preparing this document.
+## Verification Results
 
-## Known Limitations And Remaining Work
+- Latest targeted backend run: `python -m pytest -q tests\test_ai_analyzer.py tests\test_rag.py tests\test_project_upload_validation.py tests\test_smoke.py` — **38 passed** using temporary SQLite and upload storage. This is a targeted selection, not the full suite.
+- Frontend production build: `npm run build` succeeded.
+- Live Gemini API retry: one authenticated isolated ZeroDivisionError analysis returned HTTP 200, provider `gemini`, non-empty required diagnosis text fields, valid severity, and two retrievable generated test cases. Isolated SQLite and temporary upload storage were cleaned afterward.
+- Final live Gemini analyzer request (no database writes): succeeded with provider `gemini` and two generated cases; one included `10 / 2` with expected result `5`, and one included `10 / 0` with controlled-error handling. Generated cases were not executed.
+- The analyzer tests use mocks; RAG tests use fake embeddings and isolated SQLite. No external API calls occurred during the latest pytest run.
+- Live embeddings/RAG: not verified. The backend requires either `RAG_EMBEDDING_API_URL` plus `RAG_EMBEDDING_API_KEY`, or the existing OpenAI fallback (`AI_PROVIDER=openai` and `AI_API_KEY`). The current Gemini setup does not supply these values; no embedding credentials were added and no live RAG call was made.
+- No migration, Docker execution, production-database test, or uploaded-project execution was performed.
 
-- Configure credentials and perform a real embedding plus AI-provider workflow to verify live RAG end to end.
-- Enable Docker and verify one isolated runtime run; current runtime behavior is the safe static fallback.
-- Apply the additive migration only after confirming the intended database and migration process.
-- Existing stored chunks are not associated with an embedding-model identifier. Keep the embedding model stable; changing models may require manually rebuilding existing vectors.
-- RAG currently applies to source-based test-case generation, not bug-report diagnosis.
-- Continue production hardening described in `PIN_TO_PIN_SETUP.md`, including secret management, registration policy, HTTPS, CORS restrictions, backups, and deployment review.
+## Remaining Work And Production Readiness
+
+- Configure and verify an approved embedding service before claiming live RAG works; separately confirm the intended PostgreSQL schema/migration state.
+- Execute reviewed generated cases and verify any proposed fix against a trusted, isolated sample before claiming the defect is fixed.
+- Complete browser verification for login, dashboard, projects, bug details, diagnosis, generated cases, attachments, and reports. The project does not currently include configured Playwright tests.
+- Verify expired-token behavior and attachment access/ownership with isolated tests.
+- Before production, rotate/set a strong JWT secret, restrict or gate public registration, restrict CORS, use HTTPS, add rate limiting and malware scanning, plan backups/monitoring, review retention and provider data-sharing, and review migrations.

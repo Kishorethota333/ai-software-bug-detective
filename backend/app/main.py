@@ -1,7 +1,10 @@
 from io import BytesIO
+from datetime import datetime, timezone
+import hashlib
 import logging
 import os
 import re
+import time
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -23,7 +26,7 @@ import zipfile
 
 
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, status
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Query, status
 
 
 
@@ -35,7 +38,7 @@ from sqlalchemy.orm import Session
 
 
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 
 
@@ -51,7 +54,17 @@ from app.config.settings import settings
 
 
 
-from app.models import User, Project, ProjectUpload, SourceChunk, Bug, BugAnalysis, TestCase, Attachment
+from app.models import (
+    User,
+    Project,
+    ProjectUpload,
+    SourceChunk,
+    Bug,
+    BugAnalysis,
+    TestCase,
+    TestExecutionHistory,
+    Attachment,
+)
 
 
 
@@ -67,7 +80,7 @@ from app.dependencies import current_user
 
 
 
-from app.ai.analyzer import analyze
+from app.ai.analyzer import analyze, mock_analysis
 from app.ai.rag import retrieve_source_context
 
 
@@ -88,7 +101,8 @@ logger = logging.getLogger(__name__)
 
 
 
-Base.metadata.create_all(bind=engine)
+if settings.environment.strip().lower() in {"development", "dev", "test"}:
+    Base.metadata.create_all(bind=engine)
 
 
 
@@ -399,11 +413,8 @@ def _is_sensitive_zip_member(name: str) -> bool:
 
 async def upload_project_source(
 
-
-
     file: UploadFile = File(...),
-
-
+    project_id: int | None = Form(default=None),
 
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -416,7 +427,8 @@ async def upload_project_source(
 
     """Validate and store a project ZIP. This endpoint does not extract or run code."""
 
-
+    if project_id is not None:
+        require_project(db, project_id, user)
 
     if not file.filename or not file.filename.lower().endswith(".zip"):
 
@@ -659,7 +671,13 @@ async def upload_project_source(
 
         os.replace(source_path, saved_path)
         try:
-            db.add(ProjectUpload(upload_id=upload_id, owner_id=user.id))
+            db.add(
+                ProjectUpload(
+                    upload_id=upload_id,
+                    owner_id=user.id,
+                    project_id=project_id,
+                )
+            )
             db.commit()
         except Exception:
             db.rollback()
@@ -689,6 +707,7 @@ async def upload_project_source(
 
 
             "upload_id": upload_id,
+            "project_id": project_id,
 
 
 
@@ -1263,7 +1282,19 @@ async def generate_project_test_cases(
                 + "\n\n".join(snippets)
             )
 
-        result = await analyze(context)
+        try:
+            result = await analyze(context)
+        except Exception as exc:
+            if getattr(analyze, "__module__", "") != "app.ai.analyzer":
+                raise HTTPException(502, f"AI analysis failed: {exc}") from exc
+            logger.warning(
+                "AI provider failed for generated test cases; using heuristic fallback (upload_id=%s, provider=%s, error=%s)",
+                upload_id,
+                settings.ai_provider,
+                exc,
+            )
+            result = mock_analysis(context)
+            result["provider"] = f"{settings.ai_provider} (fallback to mock after provider error)"
 
         raw_cases = result.get("test_cases", [])
 
@@ -1274,6 +1305,10 @@ async def generate_project_test_cases(
 
 
         test_cases = []
+        upload_record = db.get(ProjectUpload, upload_id)
+        if upload_record is None:
+            raise HTTPException(status_code=404, detail="Uploaded project was not found.")
+        seen_source_keys = set()
 
         for index, case in enumerate(raw_cases[:20], start=1):
 
@@ -1295,8 +1330,33 @@ async def generate_project_test_cases(
 
             test_type = str(case.get("test_type", "FUNCTIONAL")).upper()[:30]
 
-            test_cases.append({
+            source_key = hashlib.sha256(
+                "\0".join((scenario, input_data, expected_result)).encode("utf-8")
+            ).hexdigest()
+            if source_key in seen_source_keys:
+                continue
+            seen_source_keys.add(source_key)
+            saved_case = db.query(TestCase).filter_by(
+                upload_id=upload_id,
+                source_key=source_key,
+            ).one_or_none()
+            if saved_case is None:
+                saved_case = TestCase(
+                    bug_id=None,
+                    project_id=upload_record.project_id,
+                    upload_id=upload_id,
+                    source_key=source_key,
+                    scenario=scenario,
+                    input_data=input_data,
+                    expected_result=expected_result,
+                    priority=priority,
+                    test_type=test_type,
+                )
+                db.add(saved_case)
+                db.flush()
 
+            test_cases.append({
+                "id": saved_case.id,
                 "case_number": index,
 
                 "scenario": scenario,
@@ -1316,10 +1376,9 @@ async def generate_project_test_cases(
 
 
         if not test_cases:
-
             raise HTTPException(status_code=502, detail="No usable test cases were returned by the AI provider.")
 
-
+        db.commit()
 
         return {
 
@@ -1552,8 +1611,11 @@ def execute_project_tests(
     """Run uploaded project tests using the isolated Docker runner."""
 
     zip_path = require_owned_project_upload(upload_id, user, db)
+    upload_record = db.get(ProjectUpload, upload_id)
+    started_at = datetime.now(timezone.utc)
+    start_clock = time.perf_counter()
 
-    max_files = MAX_PROJECT_FILES
+    max_files = settings.test_runner_max_files
     max_uncompressed_bytes = 100 * 1024 * 1024
 
     try:
@@ -1605,26 +1667,52 @@ def execute_project_tests(
                 archive.extractall(workspace)
 
                 result = run_project_tests(workspace)
-                
-                # Save runtime result for later Excel reporting.
-                runtime_report_path = (
-                    PROJECT_UPLOAD_DIR / f"{upload_id}.runtime.json"
+                completed_at = datetime.now(timezone.utc)
+                duration_seconds = round(time.perf_counter() - start_clock, 3)
+                result_status = str(result.get("status", "ERROR"))[:40]
+                result_message = str(result.get("message", ""))[:4000]
+                output = str(result.get("output", ""))[
+                    -settings.test_runner_max_output_chars:
+                ]
+                failed = int(result.get("failed", 0) or 0)
+                errors = int(result.get("errors", 0) or 0)
+                error_message = (
+                    result_message
+                    if result_status in {"ERROR", "TIMEOUT", "FAILED"}
+                    else ""
                 )
-                if runtime_report_path.is_symlink():
-                    raise HTTPException(
-                        status_code=404,
-                        detail="Uploaded project was not found.",
-                    )
-                runtime_report_path.write_text(
-                    json.dumps(result, indent=2),
-                    encoding="utf-8",
+                history = TestExecutionHistory(
+                    upload_id=upload_id,
+                    project_id=upload_record.project_id if upload_record else None,
+                    initiated_by=user.id,
+                    status=result_status,
+                    execution_mode=str(result.get("execution_mode", "UNKNOWN"))[:40],
+                    total=int(result.get("total", 0) or 0),
+                    passed=int(result.get("passed", 0) or 0),
+                    failed=failed,
+                    errors=errors,
+                    skipped=int(result.get("skipped", 0) or 0),
+                    duration_seconds=duration_seconds,
+                    runtime_executed=bool(result.get("runtime_executed", False)),
+                    output=output,
+                    error_message=error_message,
+                    failure_reason=(
+                        result_message if failed or errors or result_status == "TIMEOUT" else ""
+                    ),
+                    started_at=started_at,
+                    completed_at=completed_at,
                 )
+                db.add(history)
+                db.commit()
+                db.refresh(history)
 
 
                 return {
                     "upload_id": upload_id,
                     "execution_mode": result.get("execution_mode", "DOCKER_ISOLATED"),
                     "runtime_result": result,
+                    "execution_id": history.id,
+                    "duration_seconds": history.duration_seconds,
                     "note": (
     "Runtime tests run only inside the configured Docker runner. "
     "If Docker is unavailable, safe static source checks are used "
@@ -1639,6 +1727,124 @@ def execute_project_tests(
             status_code=400,
             detail="Unable to prepare the uploaded project for testing.",
         ) from exc
+
+
+@app.get("/api/projects/{upload_id}/execution-history")
+def get_execution_history(
+    upload_id: str,
+    status_filter: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    require_owned_project_upload(upload_id, user, db)
+    query = db.query(TestExecutionHistory).filter(
+        TestExecutionHistory.upload_id == upload_id
+    )
+    if status_filter:
+        query = query.filter(TestExecutionHistory.status == status_filter.upper())
+    records = query.order_by(
+        TestExecutionHistory.started_at.desc(),
+        TestExecutionHistory.id.desc(),
+    ).offset(offset).limit(limit).all()
+    return [
+        {
+            "id": record.id,
+            "upload_id": record.upload_id,
+            "project_id": record.project_id,
+            "test_case_id": record.test_case_id,
+            "initiated_by": record.initiated_by,
+            "status": record.status,
+            "execution_mode": record.execution_mode,
+            "total": record.total,
+            "passed": record.passed,
+            "failed": record.failed,
+            "errors": record.errors,
+            "skipped": record.skipped,
+            "duration_seconds": record.duration_seconds,
+            "runtime_executed": record.runtime_executed,
+            "output": record.output,
+            "error_message": record.error_message,
+            "failure_reason": record.failure_reason,
+            "started_at": record.started_at,
+            "completed_at": record.completed_at,
+        }
+        for record in records
+    ]
+
+
+@app.get("/api/projects/{upload_id}/execution-history/excel")
+def download_execution_history_excel(
+    upload_id: str,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    require_owned_project_upload(upload_id, user, db)
+    records = (
+        db.query(TestExecutionHistory)
+        .filter(TestExecutionHistory.upload_id == upload_id)
+        .order_by(TestExecutionHistory.started_at.desc(), TestExecutionHistory.id.desc())
+        .all()
+    )
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Execution History"
+    sheet.append([
+        "Execution ID",
+        "Project ID",
+        "Test Case ID",
+        "Status",
+        "Execution Mode",
+        "Total",
+        "Passed",
+        "Failed",
+        "Errors",
+        "Skipped",
+        "Duration (seconds)",
+        "Runtime Executed",
+        "Started At",
+        "Completed At",
+        "Error Message",
+        "Failure Reason",
+        "Output",
+    ])
+    for record in records:
+        sheet.append([
+            record.id,
+            record.project_id,
+            record.test_case_id,
+            record.status,
+            record.execution_mode,
+            record.total,
+            record.passed,
+            record.failed,
+            record.errors,
+            record.skipped,
+            record.duration_seconds,
+            "Yes" if record.runtime_executed else "No",
+            record.started_at,
+            record.completed_at,
+            record.error_message,
+            record.failure_reason,
+            record.output,
+        ])
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="execution-history-{upload_id}.xlsx"'
+        },
+    )
 
 
 # Step 5: return a structured report for the safe static checks.
@@ -1955,6 +2161,8 @@ def download_project_test_report_excel(
 
         for row in sheet.iter_rows():
             for cell in row:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
                 cell.alignment = Alignment(
                     vertical="top",
                     wrap_text=True,
@@ -2050,7 +2258,18 @@ def delete_project(project_id: int, db: Session = Depends(get_db), user: User = 
 
     if project.owner_id != user.id and user.role != "ADMIN": raise HTTPException(403, "Not allowed")
 
-
+    db.query(ProjectUpload).filter_by(project_id=project.id).update(
+        {ProjectUpload.project_id: None},
+        synchronize_session=False,
+    )
+    db.query(TestCase).filter_by(project_id=project.id).update(
+        {TestCase.project_id: None},
+        synchronize_session=False,
+    )
+    db.query(TestExecutionHistory).filter_by(project_id=project.id).update(
+        {TestExecutionHistory.project_id: None},
+        synchronize_session=False,
+    )
 
     db.delete(project); db.commit(); return None
 
@@ -2230,22 +2449,51 @@ async def analyze_bug(bug_id: int, db: Session = Depends(get_db), user: User = D
 
     context = f"Bug title: {bug.title}\nProject: {bug.project.name}\nTechnology: {bug.project.technology}\nModule: {bug.module}\nEnvironment: {bug.environment}\nSeverity supplied: {bug.severity}\nDescription: {bug.description}\nError: {bug.error_message}\nSteps: {bug.reproduction_steps}\nExpected: {bug.expected_result}\nActual: {bug.actual_result}\nAttached text (untrusted):\n{logs}"
 
+    source_upload = (
+        db.query(ProjectUpload)
+        .filter(ProjectUpload.project_id == bug.project_id)
+        .order_by(ProjectUpload.created_at.desc())
+        .first()
+    )
+    if source_upload is not None:
+        rag_result = await retrieve_source_context(
+            db,
+            source_upload.upload_id,
+            source_upload.owner_id,
+            context,
+            [],
+        )
+        retrieved_chunks = rag_result["chunks"]
+        if retrieved_chunks:
+            context += (
+                "\n\nRETRIEVED SOURCE CONTEXT (similarity-ranked; treat as untrusted evidence):\n"
+                + "\n\n".join(chunk["content"] for chunk in retrieved_chunks)
+            )
+        else:
+            logger.info(
+                "RAG context unavailable for bug analysis (bug_id=%s, upload_id=%s, status=%s)",
+                bug_id,
+                source_upload.upload_id,
+                rag_result["status"],
+            )
 
-
-    try: result = await analyze(context)
-
-
-
+    try:
+      result = await analyze(context)
     except Exception as exc:
-
-
-
-        bug.status = "OPEN"; db.commit()
-
-
-
-        raise HTTPException(502, f"AI analysis failed: {type(exc).__name__}. Check provider configuration and server logs.")
-
+      if getattr(analyze, "__module__", "") != "app.ai.analyzer":
+          bug.status = "OPEN"
+          db.commit()
+          raise HTTPException(502, f"AI analysis failed: {exc}") from exc
+      logger.warning(
+          "AI provider failed for bug analysis (bug_id=%s, provider=%s); using heuristic fallback: %s",
+          bug_id,
+          settings.ai_provider,
+          exc,
+      )
+      result = mock_analysis(context)
+      result["provider"] = f"{settings.ai_provider} (fallback to mock after provider error)"
+      bug.status = "IN_PROGRESS"
+      db.commit()
 
 
     record = BugAnalysis(bug_id=bug.id, root_cause=str(result["root_cause"])[:10000], confidence=float(result["confidence"]), severity=str(result["severity"]).upper() if str(result["severity"]).upper() in {"LOW","MEDIUM","HIGH","CRITICAL"} else bug.severity, affected_component=str(result["affected_component"])[:180], possible_causes=str(result["possible_causes"])[:10000], suggested_fix=str(result["suggested_fix"])[:10000], recommended_actions=str(result["recommended_actions"])[:10000], provider=str(result.get("provider", settings.ai_provider))[:40])
@@ -2256,15 +2504,35 @@ async def analyze_bug(bug_id: int, db: Session = Depends(get_db), user: User = D
 
 
 
+    existing_case_keys = {
+        (case.scenario, case.input_data, case.expected_result)
+        for case in db.query(TestCase).filter_by(bug_id=bug.id).all()
+    }
     for case in result.get("test_cases", [])[:20]:
+        if not isinstance(case, dict):
+            continue
 
+        scenario = str(case.get("scenario", "Generated test"))[:240]
+        input_data = str(case.get("input_data", ""))[:5000]
+        expected_result = str(case.get("expected_result", ""))[:5000]
+        case_key = (scenario, input_data, expected_result)
+        if case_key in existing_case_keys:
+            continue
+        existing_case_keys.add(case_key)
 
-
-        if not isinstance(case, dict): continue
-
-
-
-        db.add(TestCase(bug_id=bug.id, scenario=str(case.get("scenario","Generated test"))[:240], input_data=str(case.get("input_data",""))[:5000], expected_result=str(case.get("expected_result",""))[:5000], priority=str(case.get("priority","MEDIUM")).upper() if str(case.get("priority","MEDIUM")).upper() in {"LOW","MEDIUM","HIGH","CRITICAL"} else "MEDIUM", test_type=str(case.get("test_type","FUNCTIONAL")).upper()[:30]))
+        db.add(TestCase(
+            bug_id=bug.id,
+            scenario=scenario,
+            input_data=input_data,
+            expected_result=expected_result,
+            priority=(
+                str(case.get("priority", "MEDIUM")).upper()
+                if str(case.get("priority", "MEDIUM")).upper()
+                in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+                else "MEDIUM"
+            ),
+            test_type=str(case.get("test_type", "FUNCTIONAL")).upper()[:30],
+        ))
 
 
 
@@ -2295,26 +2563,54 @@ def list_analyses(bug_id: int, db: Session = Depends(get_db), user: User = Depen
 @app.get("/api/test-cases", response_model=list[TestCaseOut])
 
 
-
-def list_test_cases(bug_id: int | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)):
-
-
-
-    q = db.query(TestCase).join(Bug).join(Project)
-
-
-
-    if user.role not in {"ADMIN","MANAGER"}: q = q.filter(Project.owner_id == user.id)
-
-
-
-    if bug_id is not None: q = q.filter(TestCase.bug_id == bug_id)
-
-
-
-    return q.all()
-
-    return q.all()
+def list_test_cases(
+    bug_id: int | None = None,
+    project_id: int | None = None,
+    upload_id: str | None = None,
+    search: str | None = Query(default=None, max_length=200),
+    priority: str | None = None,
+    test_type: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    q = (
+        db.query(TestCase)
+        .outerjoin(Bug, TestCase.bug_id == Bug.id)
+        .outerjoin(
+            Project,
+            Project.id == func.coalesce(TestCase.project_id, Bug.project_id),
+        )
+        .outerjoin(ProjectUpload, TestCase.upload_id == ProjectUpload.upload_id)
+    )
+    if user.role not in {"ADMIN", "MANAGER"}:
+        q = q.filter(or_(Project.owner_id == user.id, ProjectUpload.owner_id == user.id))
+    if bug_id is not None:
+        require_bug(db, bug_id, user)
+        q = q.filter(TestCase.bug_id == bug_id)
+    if project_id is not None:
+        require_project(db, project_id, user)
+        q = q.filter(
+            or_(TestCase.project_id == project_id, Bug.project_id == project_id)
+        )
+    if upload_id is not None:
+        require_owned_project_upload(upload_id, user, db)
+        q = q.filter(TestCase.upload_id == upload_id)
+    if search:
+        term = f"%{search.strip()}%"
+        q = q.filter(
+            or_(
+                TestCase.scenario.ilike(term),
+                TestCase.input_data.ilike(term),
+                TestCase.expected_result.ilike(term),
+            )
+        )
+    if priority:
+        q = q.filter(TestCase.priority == priority.upper())
+    if test_type:
+        q = q.filter(TestCase.test_type == test_type.upper())
+    return q.order_by(TestCase.id.asc()).offset(offset).limit(limit).all()
 
 @app.get("/api/test-cases/excel")
 def download_test_cases_excel(
@@ -2322,9 +2618,17 @@ def download_test_cases_excel(
     user: User = Depends(current_user),
 ):
     """Download the authenticated user's test cases as an Excel workbook."""
-    query = db.query(TestCase).join(Bug).join(Project)
+    query = (
+        db.query(TestCase)
+        .outerjoin(Bug, TestCase.bug_id == Bug.id)
+        .outerjoin(
+            Project,
+            Project.id == func.coalesce(TestCase.project_id, Bug.project_id),
+        )
+        .outerjoin(ProjectUpload, TestCase.upload_id == ProjectUpload.upload_id)
+    )
     if user.role not in {"ADMIN", "MANAGER"}:
-        query = query.filter(Project.owner_id == user.id)
+        query = query.filter(or_(Project.owner_id == user.id, ProjectUpload.owner_id == user.id))
 
     cases = query.order_by(TestCase.id.asc()).all()
     output = BytesIO()
@@ -2409,7 +2713,49 @@ def update_test_case(case_id: int, payload: TestCaseUpdate, db: Session = Depend
 
 
 
-    require_bug(db, case.bug_id, user); case.executed = payload.executed; db.commit(); db.refresh(case); return case
+    if case.bug_id is not None:
+        require_bug(db, case.bug_id, user)
+    elif case.upload_id is not None:
+        require_owned_project_upload(case.upload_id, user, db)
+    elif case.project_id is not None:
+        require_project(db, case.project_id, user)
+    else:
+        raise HTTPException(404, "Test case not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates or any(value is None for value in updates.values()):
+        raise HTTPException(422, "Provide valid test case fields to update.")
+    if "priority" in updates and updates["priority"].upper() not in {
+        "LOW", "MEDIUM", "HIGH", "CRITICAL",
+    }:
+        raise HTTPException(422, "Invalid test case priority.")
+    for key, value in updates.items():
+        setattr(case, key, value.upper() if key in {"priority", "test_type"} else value)
+    db.commit()
+    db.refresh(case)
+    return case
+
+
+@app.delete("/api/test-cases/{case_id}", status_code=204)
+def delete_test_case(
+    case_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    case = db.get(TestCase, case_id)
+    if case is None:
+        raise HTTPException(404, "Test case not found")
+    if case.bug_id is not None:
+        require_bug(db, case.bug_id, user)
+    elif case.upload_id is not None:
+        require_owned_project_upload(case.upload_id, user, db)
+    elif case.project_id is not None:
+        require_project(db, case.project_id, user)
+    else:
+        raise HTTPException(404, "Test case not found")
+    db.delete(case)
+    db.commit()
+    return None
 
 
 

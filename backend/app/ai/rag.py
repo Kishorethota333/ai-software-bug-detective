@@ -101,20 +101,40 @@ async def retrieve_source_context(
     limit: int = 5,
 ) -> dict:
     try:
-        existing = db.query(SourceChunk).filter_by(
+        stored_chunks = db.query(SourceChunk).filter_by(
             upload_id=upload_id,
             owner_id=owner_id,
-        ).count()
-        chunks = []
-        if not existing:
-            chunks = chunk_documents(documents)
-            if not chunks:
-                return {"status": "UNAVAILABLE", "message": "No supported source text was available to index.", "chunks": []}
+        ).order_by(SourceChunk.source_name, SourceChunk.chunk_index).all()
+        incoming_chunks = chunk_documents(documents) if documents else []
+        stored_signature = [
+            (chunk.source_name, chunk.chunk_index, chunk.content)
+            for chunk in stored_chunks
+        ]
+        incoming_signature = [
+            (chunk["source_name"], chunk["chunk_index"], chunk["content"])
+            for chunk in incoming_chunks
+        ]
+        chunks = (
+            incoming_chunks
+            if incoming_chunks and incoming_signature != stored_signature
+            else []
+        )
+        if not stored_chunks and not chunks:
+            return {
+                "status": "UNAVAILABLE",
+                "message": "No supported source text was available to index.",
+                "chunks": [],
+            }
 
         vectors = await embed_texts([chunk["content"] for chunk in chunks]) if chunks else []
-        query_vector = (await embed_texts([query]))[0]
+        query_vectors = await embed_texts([query])
+        if not query_vectors:
+            raise ValueError("Embedding service returned no query vector.")
+        query_vector = query_vectors[0]
 
         if chunks:
+            if len(vectors) != len(chunks):
+                raise ValueError("Embedding service returned an unexpected vector count.")
             if any(len(vector) != len(vectors[0]) for vector in vectors):
                 raise ValueError("Embedding service returned vectors with inconsistent dimensions.")
             db.query(SourceChunk).filter_by(upload_id=upload_id, owner_id=owner_id).delete()
@@ -131,10 +151,11 @@ async def retrieve_source_context(
             ])
             db.commit()
 
-        stored_chunks = db.query(SourceChunk).filter_by(
-            upload_id=upload_id,
-            owner_id=owner_id,
-        ).all()
+        if chunks:
+            stored_chunks = db.query(SourceChunk).filter_by(
+                upload_id=upload_id,
+                owner_id=owner_id,
+            ).order_by(SourceChunk.source_name, SourceChunk.chunk_index).all()
         if stored_chunks and any(
             len(chunk.embedding) != len(query_vector)
             for chunk in stored_chunks

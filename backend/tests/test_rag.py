@@ -76,6 +76,19 @@ def test_retrieval_persists_embeddings_and_ranks_by_similarity(rag_session, monk
     assert reused["chunks"][0]["source_name"] == "src/matching.py"
     assert len(calls) == 3
 
+    refreshed = asyncio.run(rag.retrieve_source_context(
+        db,
+        "a" * 32,
+        user.id,
+        "updated query",
+        [("src/matching.py", "updated matching behavior")],
+    ))
+    assert refreshed["status"] == "RETRIEVED"
+    saved = db.query(SourceChunk).filter_by(upload_id="a" * 32, owner_id=user.id).all()
+    assert len(saved) == 1
+    assert "updated matching behavior" in saved[0].content
+    assert len(calls) == 5
+
 
 def test_retrieval_reports_missing_embedding_configuration(rag_session, monkeypatch):
     db, user = rag_session
@@ -173,6 +186,12 @@ def test_generation_injects_retrieved_chunks_into_ai_prompt(tmp_path, monkeypatc
                 },
             )
             headers = {"Authorization": f"Bearer {registration.json()['access_token']}"}
+            project = client.post(
+                "/api/projects",
+                headers=headers,
+                json={"name": "RAG project", "technology": "Python"},
+            )
+            assert project.status_code == 201, project.text
             payload = io.BytesIO()
             with zipfile.ZipFile(payload, "w") as archive:
                 archive.writestr("project/src/matching.py", "matching behavior sentinel")
@@ -184,13 +203,24 @@ def test_generation_injects_retrieved_chunks_into_ai_prompt(tmp_path, monkeypatc
             uploaded = client.post(
                 "/api/projects/upload-source",
                 headers=headers,
+                data={"project_id": str(project.json()["id"])},
                 files={"file": ("project.zip", payload.getvalue(), "application/zip")},
             )
             assert uploaded.status_code == 200, uploaded.text
 
+            upload_id = uploaded.json()["upload_id"]
             response = client.post(
-                f"/api/projects/{uploaded.json()['upload_id']}/generate-test-cases",
+                f"/api/projects/{upload_id}/generate-test-cases",
                 headers=headers,
+            )
+            repeated = client.post(
+                f"/api/projects/{upload_id}/generate-test-cases",
+                headers=headers,
+            )
+            persisted = client.get(
+                "/api/test-cases",
+                headers=headers,
+                params={"upload_id": upload_id},
             )
 
         assert response.status_code == 200, response.text
@@ -199,6 +229,12 @@ def test_generation_injects_retrieved_chunks_into_ai_prompt(tmp_path, monkeypatc
         assert "RETRIEVED SOURCE CONTEXT" in captured["context"]
         assert "Source file: project/src/matching.py" in captured["context"]
         assert "unrelated behavior sentinel 4" not in captured["context"]
+        assert repeated.status_code == 200, repeated.text
+        assert len(persisted.json()) == 1
+        saved_case = persisted.json()[0]
+        assert saved_case["id"] == response.json()["test_cases"][0]["id"]
+        assert saved_case["project_id"] == project.json()["id"]
+        assert saved_case["upload_id"] == upload_id
     finally:
         main.app.dependency_overrides.pop(get_db, None)
         engine.dispose()

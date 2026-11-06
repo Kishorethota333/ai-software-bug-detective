@@ -14,6 +14,7 @@ import api, {
   messageOf,
   downloadTestCasesExcel,
   downloadProjectTestReportExcel,
+  downloadExecutionHistoryExcel,
   executeProjectTests
 } from './api';
 
@@ -194,10 +195,36 @@ function Tests() {
   const [items, setItems] = useState([]);
   const [error, setError] = useState('');
   const [downloading, setDownloading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [priority, setPriority] = useState('');
+  const [testType, setTestType] = useState('');
+  const [offset, setOffset] = useState(0);
+  const pageSize = 50;
 
   useEffect(() => {
-    api.get('/test-cases').then(r => setItems(r.data)).catch(e => setError(messageOf(e)));
-  }, []);
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    api.get('/test-cases', {
+      params: {
+        search: search || undefined,
+        priority: priority || undefined,
+        test_type: testType || undefined,
+        offset,
+        limit: pageSize,
+      },
+      signal: controller.signal,
+    })
+      .then(({ data }) => setItems(data))
+      .catch((err) => {
+        if (!controller.signal.aborted) setError(messageOf(err));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [search, priority, testType, offset]);
 
   const downloadExcel = async () => {
     setDownloading(true);
@@ -219,17 +246,124 @@ function Tests() {
     }
   };
 
+  const toggleExecuted = async (item) => {
+    setError('');
+    try {
+      const { data } = await api.patch(`/test-cases/${item.id}`, {
+        executed: !item.executed,
+      });
+      setItems((current) => current.map((entry) => (
+        entry.id === item.id ? data : entry
+      )));
+    } catch (err) {
+      setError(messageOf(err));
+    }
+  };
+
+  const removeCase = async (item) => {
+    if (!window.confirm(`Delete test case "${item.scenario}"?`)) return;
+    setError('');
+    try {
+      await api.delete(`/test-cases/${item.id}`);
+      setItems((current) => current.filter((entry) => entry.id !== item.id));
+    } catch (err) {
+      setError(messageOf(err));
+    }
+  };
+
   return <>
     <PageHead
       eyebrow="QUALITY / VALIDATION"
       title="Test cases"
-      subtitle="Track the regression checks generated during bug investigations."
+      subtitle="Search and manage regression cases from bug analysis and source uploads."
       action={<Button type="button" onClick={downloadExcel} disabled={downloading}>
         {downloading ? 'Downloading Excel...' : 'Download Excel'}
       </Button>}
     />
     <Error text={error} />
-    <div className="panel"><div className="table-wrap"><table><thead><tr><th>SCENARIO</th><th>BUG</th><th>TYPE</th><th>PRIORITY</th><th>EXECUTED</th></tr></thead><tbody>{items.map(c => <tr key={c.id}><td><Link className="bug-link" to={`/bugs/${c.bug_id}`}>{c.scenario}</Link><div className="table-sub">Expected: {c.expected_result}</div></td><td>BUG-{c.bug_id}</td><td>{c.test_type}</td><td><span className={`pill ${c.priority.toLowerCase()}`}>{c.priority}</span></td><td>{c.executed ? 'Yes' : 'Not yet'}</td></tr>)}</tbody></table>{items.length === 0 && <div className="empty"><div className="empty-icon"><ListChecks /></div><b>No test cases yet</b><p>Run AI analysis on a bug to generate test cases.</p><Link to="/bugs" className="text-link">Browse bugs →</Link></div>}</div></div>
+    <div className="panel">
+      <div className="filters" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+        <input
+          aria-label="Search test cases"
+          value={search}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setOffset(0);
+          }}
+          placeholder="Search scenarios, input, or expected result"
+        />
+        <select
+          aria-label="Filter by priority"
+          value={priority}
+          onChange={(event) => {
+            setPriority(event.target.value);
+            setOffset(0);
+          }}
+        >
+          <option value="">All priorities</option>
+          {['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'].map((value) => (
+            <option key={value} value={value}>{value}</option>
+          ))}
+        </select>
+        <input
+          aria-label="Filter by test type"
+          value={testType}
+          onChange={(event) => {
+            setTestType(event.target.value);
+            setOffset(0);
+          }}
+          placeholder="Test type"
+        />
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>SCENARIO</th><th>ASSOCIATION</th><th>TYPE</th><th>PRIORITY</th><th>EXECUTED</th><th>ACTIONS</th></tr></thead>
+          <tbody>{items.map((item) => (
+            <tr key={item.id}>
+              <td>
+                {item.bug_id
+                  ? <Link className="bug-link" to={`/bugs/${item.bug_id}`}>{item.scenario}</Link>
+                  : <b>{item.scenario}</b>}
+                <div className="table-sub">Expected: {item.expected_result}</div>
+              </td>
+              <td>
+                {item.bug_id
+                  ? `BUG-${item.bug_id}`
+                  : item.project_id
+                    ? `Project #${item.project_id}`
+                    : `Source upload ${item.upload_id?.slice(0, 8) || ''}`}
+              </td>
+              <td>{item.test_type}</td>
+              <td><span className={`pill ${item.priority.toLowerCase()}`}>{item.priority}</span></td>
+              <td>{item.executed ? 'Yes' : 'Not yet'}</td>
+              <td>
+                <button type="button" onClick={() => toggleExecuted(item)}>
+                  Mark {item.executed ? 'not executed' : 'executed'}
+                </button>
+                {' '}
+                <button type="button" onClick={() => removeCase(item)}>Delete</button>
+              </td>
+            </tr>
+          ))}</tbody>
+        </table>
+        {loading && <div className="empty">Loading test cases…</div>}
+        {!loading && items.length === 0 && <div className="empty">
+          <div className="empty-icon"><ListChecks /></div>
+          <b>No matching test cases</b>
+          <p>Run AI analysis on a bug or generate cases from an uploaded source project.</p>
+          <Link to="/bugs" className="text-link">Browse bugs →</Link>
+        </div>}
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 16 }}>
+          <button type="button" onClick={() => setOffset(Math.max(0, offset - pageSize))} disabled={offset === 0 || loading}>
+            Previous
+          </button>
+          <span className="muted">Showing {items.length ? offset + 1 : 0}–{offset + items.length}</span>
+          <button type="button" onClick={() => setOffset(offset + pageSize)} disabled={items.length < pageSize || loading}>
+            Next
+          </button>
+        </div>
+      </div>
+    </div>
   </>;
 }
 
@@ -239,6 +373,8 @@ function Tests() {
 
 function UploadProject() {
   const [file, setFile] = useState(null);
+  const [projects, setProjects] = useState([]);
+  const [projectId, setProjectId] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
@@ -246,7 +382,14 @@ function UploadProject() {
   const [generation, setGeneration] = useState(null);
   const [checks, setChecks] = useState(null);
   const [execution, setExecution] = useState(null);
+  const [executionHistory, setExecutionHistory] = useState([]);
   const [report, setReport] = useState(null);
+
+  useEffect(() => {
+    api.get('/projects')
+      .then(({ data }) => setProjects(data))
+      .catch((err) => setError(messageOf(err)));
+  }, []);
 
   const chooseFile = (event) => {
     const selected = event.target.files?.[0] || null;
@@ -256,6 +399,7 @@ function UploadProject() {
     setGeneration(null);
     setChecks(null);
     setExecution(null);
+    setExecutionHistory([]);
     setReport(null);
 
     if (selected && !selected.name.toLowerCase().endsWith('.zip')) {
@@ -303,10 +447,12 @@ function UploadProject() {
     setGeneration(null);
     setChecks(null);
     setExecution(null);
+    setExecutionHistory([]);
     setReport(null);
     try {
       const body = new FormData();
       body.append('file', file);
+      if (projectId) body.append('project_id', projectId);
       const response = await api.post('/projects/upload-source', body);
       if (!isValidUploadId(response.data?.upload_id)) {
         throw new Error('Upload completed, but the server returned an invalid upload ID.');
@@ -348,6 +494,10 @@ function UploadProject() {
       const data = await executeProjectTests(result.upload_id);
       // Store the full execute-tests response separately from static checks.
       setExecution(data);
+      const history = await api.get(
+        `/projects/${encodeURIComponent(result.upload_id)}/execution-history`
+      );
+      setExecutionHistory(history.data);
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -382,6 +532,27 @@ function UploadProject() {
       link.click();
       link.remove();
 
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const downloadExecutionHistory = async () => {
+    if (!result?.upload_id) return;
+    setBusy('history-excel');
+    setError('');
+    try {
+      const blob = await downloadExecutionHistoryExcel(result.upload_id);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `execution-history-${result.upload_id}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
       window.URL.revokeObjectURL(url);
     } catch (err) {
       setError(messageOf(err));
@@ -446,6 +617,20 @@ function UploadProject() {
           onChange={chooseFile}
           style={{ display: 'block', width: '100%', padding: 14, border: '1px dashed var(--border, #cbd5e1)', borderRadius: 10, marginBottom: 16 }}
         />
+        <label htmlFor="project-association" style={{ display: 'block', marginBottom: 8 }}>
+          Associate upload with project
+        </label>
+        <select
+          id="project-association"
+          value={projectId}
+          onChange={(event) => setProjectId(event.target.value)}
+          style={{ display: 'block', width: '100%', padding: 12, marginBottom: 16 }}
+        >
+          <option value="">No project selected</option>
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>{project.name}</option>
+          ))}
+        </select>
         {file && <div className="attachment" style={{ marginBottom: 16 }}>
           <div className="file-icon"><FileArchive size={18} /></div>
           <div><b>{file.name}</b><small>{(file.size / 1024).toFixed(1)} KB</small></div>
@@ -545,7 +730,7 @@ function UploadProject() {
 
         {generation && <div className="panel" style={{ marginTop: 18 }}>
           <h3>Generated test cases ({count(generation, ['test_case_count', 'count']) || generation.test_cases?.length || 0})</h3>
-          <p className="muted">Generated cases are proposals until they are implemented and executed by a supported test runner.</p>
+          <p className="muted">Generated cases are saved to your test-case list. They remain proposals until implemented and executed by a supported test runner.</p>
           {(generation.test_cases || []).map((test, index) => <div className="test-case" key={test.case_number || index}>
             <b>{test.case_number ? `Case ${test.case_number}: ` : ''}{test.scenario || 'Test scenario'}</b>
             <div className="test-case-details">
@@ -647,6 +832,33 @@ function UploadProject() {
             this panel will explicitly say so — static checks are never labeled as runtime results.
           </p>
         </div>}
+
+        <div className="panel" style={{ marginTop: 18 }}>
+          <div className="panel-head">
+            <div>
+              <h3>Execution history</h3>
+              <p>Stored runs for this upload; static checks are identified separately from runtime execution.</p>
+            </div>
+            <button type="button" onClick={downloadExecutionHistory} disabled={Boolean(busy)}>
+              {busy === 'history-excel' ? 'Downloading…' : 'Download history Excel'}
+            </button>
+          </div>
+          {executionHistory.length === 0
+            ? <p className="muted">No execution history yet.</p>
+            : executionHistory.map((item) => (
+              <div className="test-case" key={item.id}>
+                <b>Run #{item.id} · {item.status} · {item.execution_mode}</b>
+                <div className="test-case-details">
+                  <p>
+                    <b>Results:</b> {item.passed} passed · {item.failed} failed · {item.errors} errors · {item.skipped} skipped
+                  </p>
+                  <p><b>Duration:</b> {item.duration_seconds}s · <b>Started:</b> {new Date(item.started_at).toLocaleString()}</p>
+                  <p><b>Execution:</b> {item.runtime_executed ? 'Isolated runtime' : 'Static or unavailable'}</p>
+                  {item.error_message && <p><b>Issue:</b> {item.error_message}</p>}
+                </div>
+              </div>
+            ))}
+        </div>
 
         {report && <div className="panel" style={{ marginTop: 18 }}>
           <h3>Test report</h3>

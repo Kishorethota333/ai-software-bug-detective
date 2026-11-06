@@ -11,7 +11,7 @@ from app import main
 
 
 @pytest.fixture
-def upload_client(tmp_path, monkeypatch):
+def upload_client(tmp_path, monkeypatch, isolated_database):
     monkeypatch.setattr(main, "PROJECT_UPLOAD_DIR", tmp_path)
     client = TestClient(main.app)
     email = f"zip-test-{uuid.uuid4().hex}@example.com"
@@ -476,4 +476,38 @@ def test_project_detail_and_bug_analysis_require_resource_ownership(
             headers=other_headers,
         ).status_code
         == 403
+    )
+
+
+def test_bug_analysis_returns_sanitized_provider_error(upload_client, monkeypatch):
+    client, headers, _ = upload_client
+    project = client.post(
+        "/api/projects",
+        headers=headers,
+        json={"name": "Provider error test"},
+    )
+    assert project.status_code == 201, project.text
+    bug = client.post(
+        "/api/bugs",
+        headers=headers,
+        json={"title": "Gemini provider failure", "project_id": project.json()["id"]},
+    )
+    assert bug.status_code == 201, bug.text
+
+    async def fail_analysis(_context):
+        raise ValueError(
+            "Gemini API request failed (HTTP 503); verify the model, API key, "
+            "quota, and service availability"
+        )
+
+    monkeypatch.setattr(main, "analyze", fail_analysis)
+    response = client.post(
+        f"/api/bugs/{bug.json()['id']}/analyze",
+        headers=headers,
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "AI analysis failed: Gemini API request failed (HTTP 503); verify the model, "
+        "API key, quota, and service availability"
     )

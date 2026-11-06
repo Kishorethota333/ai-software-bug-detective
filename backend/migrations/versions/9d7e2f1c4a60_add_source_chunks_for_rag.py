@@ -42,5 +42,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if "source_chunks" in inspect(op.get_bind()).get_table_names():
-        op.drop_table("source_chunks")
+    # Indexed chunks can be expensive to recreate; retain them during rollback.
+    pass

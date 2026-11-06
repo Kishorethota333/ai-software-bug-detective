@@ -31,6 +31,7 @@ class ProjectUpload(Base):
     __tablename__ = "project_uploads"
     upload_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 class SourceChunk(Base):
@@ -87,15 +88,49 @@ class BugAnalysis(Base):
 
 class TestCase(Base):
     __tablename__ = "test_cases"
+    __table_args__ = (
+        UniqueConstraint("upload_id", "source_key", name="uq_test_cases_upload_source_key"),
+        Index("ix_test_cases_project_upload", "project_id", "upload_id"),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
-    bug_id: Mapped[int] = mapped_column(ForeignKey("bugs.id"), index=True)
+    bug_id: Mapped[int | None] = mapped_column(ForeignKey("bugs.id"), index=True, nullable=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    upload_id: Mapped[str | None] = mapped_column(ForeignKey("project_uploads.upload_id"), nullable=True, index=True)
+    source_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     scenario: Mapped[str] = mapped_column(String(240))
     input_data: Mapped[str] = mapped_column(Text, default="")
     expected_result: Mapped[str] = mapped_column(Text, default="")
     priority: Mapped[str] = mapped_column(String(20), default="MEDIUM")
     test_type: Mapped[str] = mapped_column(String(30), default="FUNCTIONAL")
     executed: Mapped[bool] = mapped_column(default=False)
-    bug: Mapped[Bug] = relationship(back_populates="test_cases")
+    bug: Mapped[Bug | None] = relationship(back_populates="test_cases")
+
+
+class TestExecutionHistory(Base):
+    __tablename__ = "test_execution_history"
+    __table_args__ = (
+        Index("ix_test_execution_history_upload_created", "upload_id", "started_at"),
+        Index("ix_test_execution_history_project_created", "project_id", "started_at"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    upload_id: Mapped[str] = mapped_column(ForeignKey("project_uploads.upload_id"), index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    test_case_id: Mapped[int | None] = mapped_column(ForeignKey("test_cases.id"), nullable=True)
+    initiated_by: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(40))
+    execution_mode: Mapped[str] = mapped_column(String(40))
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    passed: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    errors: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)
+    duration_seconds: Mapped[float] = mapped_column(Float, default=0)
+    runtime_executed: Mapped[bool] = mapped_column(default=False)
+    output: Mapped[str] = mapped_column(Text, default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    failure_reason: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 class Attachment(Base):
     __tablename__ = "bug_attachments"

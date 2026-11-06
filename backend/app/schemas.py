@@ -42,6 +42,20 @@ class AnalysisOut(BaseModel):
     id: int; bug_id: int; root_cause: str; confidence: float; severity: str; affected_component: str; possible_causes: str; suggested_fix: str; recommended_actions: str; provider: str; created_at: datetime
 class TestCaseOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id: int; bug_id: int; scenario: str; input_data: str; expected_result: str; priority: str; test_type: str; executed: bool
-class TestCaseUpdate(BaseModel):
+    id: int
+    bug_id: int | None
+    project_id: int | None
+    upload_id: str | None
+    scenario: str
+    input_data: str
+    expected_result: str
+    priority: str
+    test_type: str
     executed: bool
+class TestCaseUpdate(BaseModel):
+    scenario: str | None = Field(default=None, min_length=1, max_length=240)
+    input_data: str | None = Field(default=None, max_length=5000)
+    expected_result: str | None = Field(default=None, max_length=5000)
+    priority: str | None = Field(default=None, max_length=20)
+    test_type: str | None = Field(default=None, max_length=30)
+    executed: bool | None = None

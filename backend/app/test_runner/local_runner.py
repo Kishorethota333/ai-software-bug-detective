@@ -4,9 +4,10 @@ import re
 import shutil
 import subprocess
 
+from app.config.settings import settings
+
 
 DOCKER_IMAGE = "ai-bug-detective-python-runner:latest"
-DEFAULT_TIMEOUT_SECONDS = 120
 
 
 def run_static_fallback(project_path: Path) -> dict:
@@ -62,7 +63,7 @@ def run_static_fallback(project_path: Path) -> dict:
 
 def run_project_tests(
     project_dir: str | Path,
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: int | None = None,
 ) -> dict:
     """
     Run project pytest tests inside an isolated Docker container.
@@ -72,6 +73,11 @@ def run_project_tests(
     """
 
     project_path = Path(project_dir).resolve()
+    effective_timeout = (
+        settings.test_runner_timeout_seconds
+        if timeout_seconds is None
+        else timeout_seconds
+    )
 
     # 1. Validate the project directory.
     if not project_path.is_dir():
@@ -136,7 +142,7 @@ def run_project_tests(
             command,
             capture_output=True,
             text=True,
-            timeout=max(1, min(timeout_seconds, 300)),
+            timeout=max(1, min(effective_timeout, 300)),
             check=False,
             shell=False,
         )

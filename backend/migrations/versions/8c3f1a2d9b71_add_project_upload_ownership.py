@@ -33,6 +33,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    if "project_uploads" in inspect(op.get_bind()).get_table_names():
-        op.drop_index("ix_project_uploads_owner_id", table_name="project_uploads")
-        op.drop_table("project_uploads")
+    # Upload ownership is user data; retain it during rollback.
+    pass
